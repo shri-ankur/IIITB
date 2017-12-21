@@ -1,0 +1,187 @@
+--Task 0: Store data on S3
+--1.Create a bucket in S3 and upload the data in the bucket.
+--Bucket created at 's3://ankur-milano/' and data uploaded
+
+--2.Once the cluster is running, open the Hue notebook.
+
+--Task 1: Understand the data in hand
+--1.The dataset is of size ~6MB, which should not be deleted. Hence import the entire data in an external table.
+--2.The data has a lot of empty cells. Import it such that the empty cells are treated as NULL in Hive.
+
+show databases;
+
+use default;
+
+drop table milano;
+
+--blank is to be treated as null character
+create external table if not exists milano(sid int,
+tint bigint, c_code smallint, sms_in double, sms_out double,
+call_in double, call_out double, inet double)
+row format delimited fields terminated by '\t'
+location 's3://ankur-milano/'
+tblproperties('serialization.null.format' = '');
+
+select * from milano limit 10;
+
+--Data Cleaning and exploration
+--Since the data is arranged by milano quare grid i , check for any invalid
+--or null values of sid
+
+select count(*) from milano;
+
+--Thus there are 100000 rows in the table milano
+
+--Check if there are any null values  or negative values in square id or sid column.
+--Check the maximum and minmum values of sid
+
+select max(sid) as Max_sid, min(sid) as Min_sid from milano;
+--The min and max sids are 1 and 10000 which is as per the information provided
+--in the link https://dandelion.eu/datagems/SpazioDati/milano-grid/description/
+
+select count(*) from milano where sid is null;
+--There are no null values in the sid column.
+
+select count(distinct sid) from milano;
+--There is data for 240 square grids in the table.
+
+--Check for null and invalid values of country code
+select min(c_code) as Min_Country, max(c_code) as Max_Country from milano;
+-- Min country code is 0 and max country code is 18099. Thus there are no invalid values.
+
+select count(*) from milano where c_code is null;
+--58 rows where country code is null or blank, these rows are effectively same as where country code
+--is 0 or not known
+
+
+--Task 2: Writing Hive Queries - I
+-- You are working as an analyst responsible for analysing telecom data of three countries (country_code = 39, 43, 33). 
+-- First create a table from the external table created in task 1, to store the data corresponding only to these three countries. 
+
+drop table milano_analysis;
+
+create table if not exists milano_analysis like milano;
+
+desc formatted milano_analysis;
+--From the description, it can be confirmed that milano-analysis is exactly like
+--milano
+
+--check for number of rows in milano table where country code = 33, 39 or 43
+select count(*) from milano where c_code in (33,39,43);
+--There are 38223 rows pertaining to these 3 countries
+
+--populate the milano_analysis table with these rows
+insert overwrite table milano_analysis
+select * from milano
+where c_code in (33,39,43);
+
+select * from milano_analysis limit 20;
+
+--check for row counts to see if al rows have been imported
+select count(*) from milano_analysis;
+--From the output, it can be seen that all the 38223 rows have been imported successfully.
+
+--Check country code column to see if the data is pertaining to only these 3 country codes
+select distinct c_code from milano_analysis;
+--From the results, it is clear that all the rows are pertaining to these 3 country codes only
+
+--1.How many grids (square_ids) are there in total in the given three countries?
+--Display the number of unique grids in the three countries.
+select count(distinct sid) as UniqueGrids from milano_analysis;
+--There are 240 unique grids in the 3 countries.
+
+--2.Which country has the minimum total internet activity? Display the country code of this country.
+--The assumption here is that the query is run in interactive mode
+select sum(inet) as total_internet, c_code from milano_analysis
+group by c_code order by total_internet limit 1;
+--Total internet activity 0.1503 with country code 43
+
+--3.Which country among the given three has the second highest total activity? 
+--Note that total activity is defined as the sum of sms_in, sms_out, call_in, call_out, internet_traffic. 
+--Display the country code of this country. Do not compress the table.
+select * from 
+(select b.c_code, b.total_activity,
+rank() over(order by b.total_activity desc) as rnk from
+(select sum(nvl(sms_in,0) + nvl(sms_out,0) + nvl(call_in,0) + nvl(call_out,0) + nvl(inet,0)) as total_activity, c_code 
+from milano_analysis
+group by c_code) b) a
+where rnk = 2;
+--country with second highest activity is 33 with total activiity = 205.907
+
+--4.Which squareID has the maximum total SMS activity in these three countries?
+--Note that total SMS activity is the sum of incoming and outgoing SMSes.
+select sum(nvl(sms_in,0) + nvl(sms_out,0)) as sms_activity, sid 
+from milano_analysis
+group by sid order by sms_activity desc limit 1;
+--square id 1151 has the maximum sms activity of 2063.551 in these 3 countries
+
+--5.What is the total activity for the three countries?
+--Note that total activity is defined as the sum of sms_in, sms_out, call_in, call_out, internet_traffic.
+--For this task, first compress the table that was created in the beginning of task 2.
+--Submit the result upto three decimal places, without rounding off the digits, obtained after compressing the table.  
+drop table milano_analysis_orc;
+create table if not exists milano_analysis_orc like milano
+stored as orc
+tblproperties ("orc.compress"="SNAPPY");
+
+--populate the table
+insert overwrite table milano_analysis_orc
+select * from milano_analysis;
+
+--check if the data has been inserted properly
+select * from milano_analysis_orc limit 10;
+
+select count(*) from milano_analysis_orc;
+--Table has 38223 rows same as in milano_analysis
+
+select sum(nvl(sms_in,0) + nvl(sms_out,0) + nvl(call_in,0) + nvl(call_out,0) + nvl(inet,0)) as total_activity 
+from milano_analysis_orc;
+--Total activity is 568447.566
+
+--Task 3 Now, say you want to analyze a specific country with country code=39. 
+--Also, you are analysing the activity of three specific grids with square_ids 101, 102 and 103 in this country.
+--First partition the table you created in the beginning of task 2, which makes it fast and convenient to query this particular country. 
+
+drop table milano_analysis_part;
+
+create external table if not exists milano_analysis_part(
+sid int, tint bigint, sms_in double, sms_out double,
+call_in double, call_out double, inet double)
+partitioned by (c_code smallint)
+location 's3://ankur-milano-part/'
+tblproperties('serialization.null.format' = '');
+
+# To load the partitions dynamically
+SET hive.exec.dynamic.partition = true;
+SET hive.exec.dynamic.partition.mode = nonstrict;
+
+insert overwrite table milano_analysis_part partition (c_code)
+select sid, tint,  sms_in, sms_out, call_in, call_out, inet, c_code 
+from milano_analysis;
+
+--check if the data has been inserted properly
+select * from milano_analysis_part limit 10;
+
+select count(*) from milano_analysis_part;
+--Table has 38223 rows same as in milano_analysis
+
+--3.1 What is the total call activity from the three square_ids to country_code 39? 
+--Submit the result upto three decimal places, without rounding off the digits.
+select sum(call_in) + sum(call_out) as Total_call_39
+from milano_analysis_part
+where c_code = 39 and sid in (101, 102, 103);
+--Thus total call activity = 290.821
+
+--3.2 What is the total SMS activity from the three square_ids to country_code 39? 
+--Submit the result upto three decimal places, without rounding off the digits.
+select sum(sms_out) + sum(sms_in) as Total_sms_39
+from milano_analysis_part
+where c_code = 39 and sid in (101, 102, 103);
+--Thus total sms activity from the 3 square ids to country code 39 is 622.232
+
+--3.3 What is the total activity, i.e. sum of CallIn, CallOut, SMSIn, SMSOut, internet traffic of the three square_ids?
+--Submit the result upto three decimal places, without rounding off the digits. You may either compress the partitioned table or not.
+select sum(sms_in) + sum(sms_out) + sum(call_in) + sum(call_out) + sum(inet) as total_activity_3sid
+from milano_analysis_part
+where sid in (101, 102, 103);
+--Thus total activity of the 3 square ids is 5345.594
